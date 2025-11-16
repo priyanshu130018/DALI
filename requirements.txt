@@ -1,0 +1,9 @@
+dotenv
+vosk
+pyaudio
+pyttsx3
+requests
+pvporcupine
+langdetect
+rasa==3.6.20
+openai

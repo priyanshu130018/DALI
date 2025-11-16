@@ -1,0 +1,21 @@
+# Environment variables
+.env
+
+# Python
+__pycache__/
+.Python
+venv/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Models (large files)
+models/*.tar.gz
+models/vosk-model-*
+models/rasa/
+models/rasa/models
