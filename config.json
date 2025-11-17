@@ -1,11 +1,11 @@
 {
   "assistant": {
     "name": "DALI",
-    "wake_word_path": "wakeup_word/hello-dali_en_windows_v3_0_0.ppn",
     "language": "en-in",
     "voice_rate": 160,
-    "session_timeout": 120,
-    "listen_timeout": 10
+    "listen_timeout": 30,
+    "sleep_timeout": 300,
+    "wake_word_path": "wakeup_word/hello-dali_en_windows_v3_0_0.ppn"
   },
   "offline": {
     "vosk_models": {
@@ -16,8 +16,7 @@
   },
   "online": {
     "timeout": 30,
-    "use_openai": true,
-    "openai_model": "gpt-3.5-turbo"
+    "groq_model": "llama-3.3-70b-versatile"
   },
   "voices": {
     "en-in": "Zira",     
@@ -25,7 +24,7 @@
   },
   "keys": {
     "picovoice": "${PICOVOICE_ACCESS_KEY}",
-    
-    "openai_api_key": "${OPENAI_API_KEY}"
+    "openai_api_key": "${OPENAI_API_KEY}",
+    "groq_api_key": "${GROQ_API_KEY}"
   }
 }
