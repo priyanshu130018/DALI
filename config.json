@@ -12,11 +12,12 @@
       "en-in": "models/vosk-model-en-in-0.5",
       "hi-in": "models/vosk-model-hi-0.22"
     },
-    "rasa_model": "models/rasa/models"
+    "rasa_model": "models/rasa/models/20251117-010047-libretto-carriage.tar.gz"
   },
   "online": {
+    "provider": "sarvam",
     "timeout": 30,
-    "groq_model": "llama-3.3-70b-versatile"
+    "sarvam_model": "sarvam-m"
   },
   "voices": {
     "en-in": "Zira",     
@@ -24,7 +25,6 @@
   },
   "keys": {
     "picovoice": "${PICOVOICE_ACCESS_KEY}",
-    "openai_api_key": "${OPENAI_API_KEY}",
-    "groq_api_key": "${GROQ_API_KEY}"
+    "sarvam_api_key": "${SARVAM_API_KEY}"
   }
 }

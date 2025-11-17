@@ -19,10 +19,8 @@ def substitute_env_variables(value):
     def replace_var(match):
         var_name = match.group(1)
         env_value = os.getenv(var_name)
-        
         if env_value is None:
-            raise ValueError(f"Environment variable '{var_name}' not found in .env file")
-        
+            return match.group(0)
         return env_value
     
     # Replace ${VAR_NAME} with actual value

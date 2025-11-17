@@ -13,23 +13,43 @@ except Exception:
     config = {}
 
 
+def has_internet(timeout=3):
+    try:
+        r = requests.get("https://www.google.com/generate_204", timeout=timeout)
+        return r.status_code == 204
+    except Exception:
+        return False
+
+
 def is_cloud_available(timeout=3):
-    """Generic cloud LLM availability check.
+    sarvam_key = os.environ.get("SARVAM_API_KEY") or (config.get("keys") or {}).get("sarvam_api_key")
+    model = (config.get("online") or {}).get("sarvam_model", "sarvam-m")
 
-    Prefer OpenAI (if `OPENAI_API_KEY` env or `keys.openai_api_key` present).
-    Returns True if the selected cloud service responds.
-    """
-    openai_key = os.environ.get("OPENAI_API_KEY") or (config.get("keys") or {}).get("openai_api_key")
-    if openai_key:
-        try:
-            r = requests.get("https://api.openai.com/v1/models", headers={"Authorization": f"Bearer {openai_key}"}, timeout=timeout)
-            return r.status_code == 200
-        except Exception:
-            return False
+    if not sarvam_key:
+        return False
 
-    # No cloud configured
-    return False
+    url = "https://api.sarvam.ai/v1/chat/completions"
+    headers = {
+        "api-subscription-key": f"{sarvam_key}",
+        "Content-Type": "application/json",
+    }
+    payload = {
+        "model": model,
+        "messages": [{"role": "user", "content": "hi"}],
+        "max_tokens": 1,
+        "temperature": 0.2,
+    }
+
+    try:
+        r = requests.post(url, headers=headers, json=payload, timeout=timeout)
+        if r.status_code == 200:
+            data = r.json()
+            return bool(data.get("choices"))
+        return False
+    except Exception:
+        return False
 
 
 if __name__ == "__main__":
-    print("Cloud availability:", is_cloud_available())
+    print("Internet:", has_internet())
+    print("Sarvam cloud availability:", is_cloud_available())

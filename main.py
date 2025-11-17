@@ -1,6 +1,6 @@
 """main.py
 DALI Voice Assistant - Voice-Only Mode
-Powered by FREE Groq API for cloud processing.
+Uses Sarvam API for cloud processing when available.
 Listens via microphone, responds with voice.
 """
 
@@ -9,6 +9,10 @@ import sys
 import json
 import struct
 import time
+import io
+import wave
+import audioop
+import platform
 from pathlib import Path
 
 # Add parent directory to path for imports
@@ -16,7 +20,12 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 try:
     from config_loader import load_config
-    from online.cloud_connector import get_cloud_response
+    from online.cloud_connector import get_cloud_response, transcribe_audio, synthesize_speech
+    try:
+        from offline.rasa_handler import RasaHandler
+        RASA_AVAILABLE = True
+    except Exception:
+        RASA_AVAILABLE = False
 except ImportError as e:
     print(f"Error importing modules: {e}")
     sys.exit(1)
@@ -108,7 +117,7 @@ class TTSHandler:
 
 
 class VoiceAssistant:
-    """Voice-only DALI assistant powered by Groq."""
+    """Voice-only DALI assistant with optional Sarvam cloud."""
     
     def __init__(self):
         """Initialize the voice assistant."""
@@ -116,6 +125,7 @@ class VoiceAssistant:
         self.assistant_config = self.config.get("assistant", {})
         self.name = self.assistant_config.get("name", "DALI")
         self.language = self.assistant_config.get("language", "en-in")
+        self.mode = self.assistant_config.get("mode", "auto").lower()
         
         self.running = False
         self.cloud_available = False
@@ -124,14 +134,11 @@ class VoiceAssistant:
         self.porcupine = None
         self.vosk_model = None
         self.recognizer = None
+        self.rasa_handler = None
+        self.offline_fallback_active = False
         
         # Check requirements
         if not all([AUDIO_AVAILABLE, TTS_AVAILABLE, VOSK_AVAILABLE]):
-            print("\n❌ Voice mode requires: pyaudio, pyttsx3, and vosk")
-            print("Install with:")
-            print("  pip install pyaudio")
-            print("  pip install pyttsx3==2.91")
-            print("  pip install vosk")
             sys.exit(1)
         
         self._init_tts()
@@ -205,7 +212,7 @@ class VoiceAssistant:
                     access_key=picovoice_key,
                     keyword_paths=[wake_word_path]
                 )
-                print(f"✓ Wake word 'Hello {self.name}' initialized")
+                print(f"✓ Wake word initialized: {os.path.basename(wake_word_path)}")
             else:
                 print(f"⚠ Wake word file not found: {wake_word_path}")
         except Exception as e:
@@ -213,27 +220,20 @@ class VoiceAssistant:
             self.porcupine = None
     
     def _check_cloud_availability(self):
-        """Check if Groq cloud service is available."""
-        print("Checking Groq API...")
-        
-        groq_key = os.environ.get("GROQ_API_KEY") or \
-                   (self.config.get("keys") or {}).get("groq_api_key", "").replace("${GROQ_API_KEY}", "")
-        
-        if groq_key and not groq_key.startswith("${"):
-            try:
-                # Quick test call
-                test_response = get_cloud_response("Hi")
-                if test_response:
-                    self.cloud_available = True
-                    print("✓ Groq API (FREE) is ready!")
-                    return
-            except Exception as e:
-                print(f"⚠ Groq API test failed: {e}")
+        """Check if cloud service is available (Sarvam)."""
+        print("Checking Cloud API...")
+        try:
+            test_response = get_cloud_response("Hi")
+            if test_response:
+                self.cloud_available = True
+                print("✓ Cloud API is ready!")
+                return
+        except Exception as e:
+            print(f"⚠ Cloud API test failed: {e}")
         
         self.cloud_available = False
-        print("❌ Groq API not available!")
-        print("   Get FREE API key: https://console.groq.com/")
-        print("   Then set: export GROQ_API_KEY='your-key-here'")
+        print("❌ Cloud API not available!")
+        print("   Set SARVAM_API_KEY in your environment or .env")
     
     def speak(self, text):
         """Convert text to speech."""
@@ -242,11 +242,33 @@ class VoiceAssistant:
             
         print(f"🔊 {self.name}: {text}")
         
+        if self.mode == "online" and self.cloud_available and not self.offline_fallback_active:
+            try:
+                lang = getattr(self, "last_detected_lang", None) or self.language
+                lang = lang.replace("_", "-")
+                if len(lang) == 5 and lang[2] == '-':
+                    lang = lang[:2] + '-' + lang[3:].upper()
+                audio_bytes = synthesize_speech(text, language_code=lang)
+                if platform.system().lower().startswith("win"):
+                    import winsound
+                    winsound.PlaySound(audio_bytes, winsound.SND_MEMORY)
+                else:
+                    buf = io.BytesIO(audio_bytes)
+                    with wave.open(buf, 'rb') as wf:
+                        stream = self.audio.open(format=pyaudio.paInt16, channels=wf.getnchannels(), rate=wf.getframerate(), output=True)
+                        data = wf.readframes(1024)
+                        while data:
+                            stream.write(data)
+                            data = wf.readframes(1024)
+                        stream.stop_stream()
+                        stream.close()
+                return
+            except Exception as e:
+                print(f"⚠ Online TTS failed: {e}")
+        
         if not self.tts_handler:
             print("⚠ TTS handler not available")
             return
-        
-        # Use the TTS handler which creates fresh engine each time
         self.tts_handler.speak(text)
     
     def listen_for_wake_word(self):
@@ -269,7 +291,8 @@ class VoiceAssistant:
             )
             
             print(f"\n{'='*60}")
-            print(f"🎤 Listening for wake word: 'Hello {self.name}'...")
+            display_kw = os.path.basename(self.assistant_config.get("wake_word_path") or "") if self.assistant_config.get("wake_word_path") else f"Hello {self.name}"
+            print(f"🎤 Listening for wake word: {display_kw}...")
             print(f"{'='*60}")
             
             while self.running:
@@ -279,6 +302,8 @@ class VoiceAssistant:
                 keyword_index = self.porcupine.process(pcm)
                 if keyword_index >= 0:
                     print(f"✓ Wake word detected!")
+                    # Reset any previous offline fallback for this awake window
+                    self.offline_fallback_active = False
                     audio_stream.stop_stream()
                     audio_stream.close()
                     return True
@@ -373,9 +398,70 @@ class VoiceAssistant:
         else:
             print("⚠ No speech detected")
             return None
+
+    def listen_for_command_online(self, timeout=15):
+        audio_stream = None
+        try:
+            audio_stream = self.audio.open(
+                rate=16000,
+                channels=1,
+                format=pyaudio.paInt16,
+                input=True,
+                frames_per_buffer=4000
+            )
+            print("🎤 Listening... (online mode)")
+            start_time = time.time()
+            frames = []
+            started = False
+            silence_start = None
+            while time.time() - start_time < timeout:
+                data = audio_stream.read(4000, exception_on_overflow=False)
+                rms = audioop.rms(data, 2)
+                if rms > 300:
+                    started = True
+                    silence_start = None
+                    frames.append(data)
+                elif started:
+                    if silence_start is None:
+                        silence_start = time.time()
+                    frames.append(data)
+                    if time.time() - silence_start > 1.0:
+                        break
+            if not frames:
+                return None
+            buf = io.BytesIO()
+            with wave.open(buf, 'wb') as wf:
+                wf.setnchannels(1)
+                wf.setsampwidth(2)
+                wf.setframerate(16000)
+                wf.writeframes(b''.join(frames))
+            audio_bytes = buf.getvalue()
+            try:
+                text, detected_lang = transcribe_audio(audio_bytes, language_code=None)
+                if text:
+                    if detected_lang:
+                        self.last_detected_lang = detected_lang
+                    print(f"✓ You said: {text}")
+                else:
+                    print("⚠ No speech detected")
+                return text or None
+            except Exception as e:
+                print(f"⚠ Online STT failed: {e}")
+                return None
+        except Exception as e:
+            print(f"⚠ Microphone error: {e}")
+            return None
+        finally:
+            if audio_stream:
+                try:
+                    audio_stream.stop_stream()
+                    audio_stream.close()
+                    time.sleep(0.2)
+                except Exception:
+                    pass
     
     def process_command(self, command):
-        """Process voice command using Groq cloud."""
+        """Process voice command using cloud backend if available."""
         if not command:
             self.speak("I didn't catch that. Please try again.")
             return
@@ -388,16 +474,13 @@ class VoiceAssistant:
             self.running = False
             return
         
-        # Try cloud processing with Groq
-        if self.cloud_available:
+        # Try cloud processing with selected provider
+        if self.cloud_available and not self.offline_fallback_active:
             try:
-                print("☁️ Processing with Groq (FREE)...")
+                print("☁️ Processing with Cloud API...")
                 
                 # Create a system prompt to define DALI's role
-                system_prompt = f"""You are {self.name}, a helpful voice assistant. You are NOT Salvador Dali the artist.
-You can access current information and perform tasks. Keep responses concise and conversational (2-3 sentences max) since you're speaking out loud.
-For time/date queries, provide the actual current time or date.
-Be friendly, helpful, and direct."""
+                system_prompt = f"""You are {self.name}, a helpful voice assistant"""
                 
                 response = get_cloud_response(command, system_prompt=system_prompt)
                 
@@ -409,13 +492,22 @@ Be friendly, helpful, and direct."""
                 self.speak(response)
                 return
             except Exception as e:
-                print(f"⚠ Groq processing failed: {e}")
-                self.cloud_available = False  # Mark as unavailable
-                self.speak("I'm having trouble with the cloud service.")
+                print(f"⚠ Cloud processing failed: {e}")
+                self.cloud_available = False
+                self.offline_fallback_active = True
+                self.speak("Cloud service unavailable. Falling back to offline mode.")
         
-        # Fallback to basic offline responses
         print("💾 Using offline mode...")
-        response = self._offline_response(command)
+        response = None
+        if RASA_AVAILABLE:
+            try:
+                if self.rasa_handler is None:
+                    self.rasa_handler = RasaHandler()
+                response = self.rasa_handler.get_response(command)
+            except Exception:
+                response = None
+        if not response:
+            response = self._offline_response(command)
         self.speak(response)
     
     def _offline_response(self, query):
@@ -442,24 +534,29 @@ Be friendly, helpful, and direct."""
         
         # What can you do
         if "what can you" in query_lower or "help" in query_lower:
-            return "In offline mode, I can tell you the time and date. For more features, please check the Groq API connection."
+            return "In offline mode, I can tell you the time and date. For more features, enable the cloud connection."
         
         # Default
-        return "I'm sorry, I need cloud connection for that. Please check if GROQ_API_KEY is set correctly."
+        return "I'm sorry, I need cloud connection for that. Please set SARVAM_API_KEY if you want online features."
     
     def run(self):
         """Run the voice assistant."""
         print(f"\n{'='*60}")
         print(f"  {self.name} Voice Assistant - Voice Mode")
-        print(f"  Powered by Groq (FREE)")
+        print(f"  Uses Sarvam cloud when available")
         print(f"{'='*60}")
+        mode_label = {"online": "Online only", "offline": "Offline only", "auto": "Auto"}.get(self.mode, "Auto")
+        print(f"Mode: {mode_label}")
         print(f"Status: {'🟢 Online' if self.cloud_available else '🔴 Offline'}")
         
-        if not self.cloud_available:
+        if self.mode == "online" and not self.cloud_available:
+            print("\n⚠️  Cloud service unavailable in Online mode!")
+            print("   Set SARVAM_API_KEY and check internet connection")
+            print("   Offline fallback is disabled in this mode.\n")
+        elif not self.cloud_available:
             print("\n⚠️  Cloud service unavailable!")
-            print("   Get FREE Groq API key: https://console.groq.com/")
-            print("   Then set: export GROQ_API_KEY='gsk_your_key_here'")
-            print("   Continuing in limited offline mode...\n")
+            print("   Set SARVAM_API_KEY to enable cloud responses")
+            print("   Continuing in offline mode...\n")
         
         print(f"\nPress Ctrl+C to exit\n")
         
@@ -469,23 +566,32 @@ Be friendly, helpful, and direct."""
         
         try:
             while self.running:
-                # Wait for wake word or manual activation
                 if not self.listen_for_wake_word():
                     continue
-                
+
                 if self.porcupine:
                     self.speak("Yes?")
-                
-                # Listen for command
-                command = self.listen_for_command()
-                
-                # Process command
-                if command:
-                    self.process_command(command)
-                else:
-                    self.speak("I didn't hear anything. Please try again.")
-                
-                time.sleep(0.5)
+
+                active_window = self.assistant_config.get("sleep_timeout", 300)
+                listen_timeout = self.assistant_config.get("listen_timeout", 30)
+                last_activity = time.time()
+                print(f"🕑 Awake for up to {int(active_window/60)} minutes. Say a command.")
+
+                while self.running and (time.time() - last_activity) < active_window:
+                    if self.mode == "online" and self.cloud_available and not self.offline_fallback_active:
+                        command = self.listen_for_command_online(timeout=listen_timeout)
+                    else:
+                        command = self.listen_for_command(timeout=listen_timeout)
+
+                    if command:
+                        last_activity = time.time()
+                        self.process_command(command)
+                    else:
+                        print("… No speech detected. Staying awake until timeout.", end='\r')
+
+                    time.sleep(0.2)
+
+                print("\n😴 No voice activity. Going back to sleep.")
                 
         except KeyboardInterrupt:
             print("\n\n⏹ Interrupted by user")
@@ -513,7 +619,7 @@ def main():
     """Main entry point."""
     print(f"\n{'='*60}")
     print(f"  DALI Voice Assistant")
-    print(f"  Powered by FREE Groq API")
+    print(f"  Voice-only mode with cloud optional")
     print(f"{'='*60}\n")
     
     # Check Python version
@@ -527,18 +633,7 @@ def main():
         test_microphone()
         return
     
-    # Check Groq API key
-    groq_key = os.environ.get("GROQ_API_KEY")
-    if not groq_key:
-        print("⚠️  WARNING: GROQ_API_KEY not set!")
-        print("\n📝 To get FREE Groq API key:")
-        print("   1. Go to: https://console.groq.com/")
-        print("   2. Sign up (FREE, no credit card)")
-        print("   3. Create API key")
-        print("   4. Set it:")
-        print("      Windows: set GROQ_API_KEY=gsk_your_key_here")
-        print("      Linux/Mac: export GROQ_API_KEY=gsk_your_key_here")
-        print("\n   Continuing in limited offline mode...\n")
+    # Cloud API key is optional; runs in offline mode without it
     
     # Initialize and run assistant
     try:
@@ -576,7 +671,6 @@ def test_microphone():
         
         if not os.path.exists(model_path):
             print(f"❌ Vosk model not found at: {model_path}")
-            print(f"Download from: https://alphacephei.com/vosk/models")
             return
         
         print("✓ Loading speech model...")
@@ -594,7 +688,7 @@ def test_microphone():
         )
         
         print("\n✓ Microphone is working!")
-        print("🎤 Say something (I'll listen for 10 seconds)...\n")
+        print("🎤 Say something...\n")
         
         start_time = time.time()
         recognized_text = ""
@@ -629,11 +723,6 @@ def test_microphone():
             print("Your microphone and speech recognition are working perfectly!")
         else:
             print("⚠️  No speech detected.")
-            print("\nTroubleshooting:")
-            print("1. Check if your microphone is plugged in")
-            print("2. Make sure microphone is not muted")
-            print("3. Speak louder and closer to the microphone")
-            print("4. Check Windows Sound Settings > Input device")
         
     except Exception as e:
         print(f"❌ Test failed: {e}")
