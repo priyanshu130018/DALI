@@ -7,6 +7,8 @@ import sys
 import os
 from datetime import datetime
 import random
+import webbrowser
+import warnings
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -135,6 +137,14 @@ class RasaHandler:
         return "Changing to next track"
     
     def _action_open_app(self) -> str:
+        t = getattr(self, "last_text", "") or ""
+        tl = t.lower()
+        if "youtube" in tl:
+            try:
+                webbrowser.open("https://www.youtube.com/")
+                return "Opening YouTube"
+            except Exception:
+                return "Could not open YouTube"
         return "Please specify which app to open"
     
     def _action_close_app(self) -> str:
@@ -155,6 +165,7 @@ class RasaHandler:
     def get_response(self, text: str) -> str:
         """Send user text to Rasa model and return best response."""
         try:
+            self.last_text = text
             responses = self.agent.handle_text(text)
 
             # Support both sync and async Rasa handlers
@@ -168,7 +179,10 @@ class RasaHandler:
             if not responses or (isinstance(responses, list) and len(responses) == 0):
                 # Try to get intent from last parse
                 try:
-                    intent = self.agent.tracker_store.get_or_create_tracker("default").latest_message.intent.get("name")
+                    tracker = self.agent.tracker_store.get_or_create_tracker("default")
+                    if inspect.isawaitable(tracker):
+                        tracker = asyncio.run(tracker)
+                    intent = tracker.latest_message.intent.get("name")
                     
                     # Use dynamically loaded mapping
                     if intent in self.intent_to_action:
@@ -216,3 +230,12 @@ class RasaHandler:
         
         except Exception as e:
             return "Something went wrong while processing your request."
+
+    def _action_switch_language(self) -> str:
+        t = getattr(self, "last_text", "") or ""
+        tl = t.lower()
+        if "hindi" in tl:
+            return "Switched language to hindi"
+        if "english" in tl:
+            return "Switched language to english"
+        return "I could not switch language"
