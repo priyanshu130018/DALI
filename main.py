@@ -14,6 +14,9 @@ import io
 import wave
 import audioop
 import platform
+import logging
+import threading
+from typing import Optional, Tuple
 from pathlib import Path
 
 
@@ -22,13 +25,19 @@ sys.path.append(os.path.dirname(os.path.abspath(__file__)))
 
 
 try:
-    from config_loader import load_config
-    from online.cloud_connector import get_cloud_response, transcribe_audio, synthesize_speech
+    from utils.config import load_config
+    from services.sarvam_service import get_cloud_response, transcribe_audio, synthesize_speech
+    from online.network_utils import has_internet, is_cloud_available
     try:
         from offline.rasa_handler import RasaHandler
         RASA_AVAILABLE = True
     except Exception:
         RASA_AVAILABLE = False
+    try:
+        from database.db_manager import DBManager
+    except Exception:
+        DBManager = None
+    from agents.realtime import RealtimeAgent
 except ImportError as e:
     print(f"Error importing modules: {e}")
     sys.exit(1)
@@ -53,12 +62,11 @@ except ImportError:
 
 
 try:
-    import pyttsx3
+    import offline.tts_engine as tts_engine
     TTS_AVAILABLE = True
-except ImportError:
+except Exception:
     TTS_AVAILABLE = False
-    print("ERROR: pyttsx3 not installed!")
-    print("Install with: pip install pyttsx3==2.91")
+    print("ERROR: tts_engine not available!")
 
 
 try:
@@ -71,57 +79,7 @@ except ImportError:
 
 
 
-class TTSHandler:
-    """Wrapper for pyttsx3 to handle speaking issues."""
-    
-    def __init__(self, config):
-        self.config = config
-        self.assistant_config = config.get("assistant", {})
-        self.language = self.assistant_config.get("language", "en-in")
-        print("✓ Text-to-speech handler initialized")
-    
-    def speak(self, text):
-        """Speak text using fresh engine instance each time."""
-        if not text:
-            return
-        
-        try:
-            # Create new engine for each speech to avoid hanging
-            if os.name == 'nt':
-                engine = pyttsx3.init(driverName='sapi5')
-            else:
-                engine = pyttsx3.init()
             
-            # Configure engine
-            rate = self.assistant_config.get("voice_rate", 160)
-            engine.setProperty('rate', rate)
-            engine.setProperty('volume', 1.0)
-            
-            # Set voice if specified in config
-            voices_config = self.config.get("voices", {})
-            voice_name = voices_config.get(self.language)
-            if voice_name:
-                voices = engine.getProperty('voices')
-                for voice in voices:
-                    if voice_name.lower() in voice.name.lower():
-                        engine.setProperty('voice', voice.id)
-                        break
-            
-            # Speak the text
-            engine.say(text)
-            engine.runAndWait()
-            
-            # Cleanup
-            engine.stop()
-            del engine
-            
-            # Small delay after speaking
-            time.sleep(0.2)
-            
-        except Exception as e:
-            print(f"⚠ TTS error: {e}")
-            import traceback
-            traceback.print_exc()
 
 
 
@@ -137,6 +95,7 @@ class VoiceAssistant:
         self.mode = self.assistant_config.get("mode", "auto").lower()
         
         self.running = False
+        self.paused = False
         self.cloud_available = False
         self.tts_handler = None
         self.audio = None
@@ -145,25 +104,38 @@ class VoiceAssistant:
         self.recognizer = None
         self.rasa_handler = None
         self.offline_fallback_active = False
+        self.db = None
+        self.last_detected_lang: Optional[str] = None
+        self.stop_playback = threading.Event()
+        self.playing_online = False
+        self.playback_thread: Optional[threading.Thread] = None
+        self.realtime = RealtimeAgent()
         
         # Check requirements
         if not all([AUDIO_AVAILABLE, TTS_AVAILABLE, VOSK_AVAILABLE]):
             sys.exit(1)
         
+        self._init_logging()
         self._init_tts()
         self._init_audio()
         self._init_speech_recognition()
         self._init_wake_word()
         self._check_cloud_availability()
+        self._init_db()
+
+    def _init_logging(self) -> None:
+        """Initialize logging."""
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
+        )
+        self.logger = logging.getLogger("DALI.Main")
         
     def _init_tts(self):
         """Initialize text-to-speech handler."""
         try:
-            self.tts_handler = TTSHandler(self.config)
-            
-            # Test the TTS
             print("🔊 Testing TTS...")
-            self.tts_handler.speak("System ready")
+            tts_engine.speak("System ready", lang_code=self.language, wait=True)
             
         except Exception as e:
             print(f"❌ TTS initialization failed: {e}")
@@ -228,12 +200,13 @@ class VoiceAssistant:
             print(f"⚠ Wake word initialization failed: {e}")
             self.porcupine = None
     
-    def _check_cloud_availability(self):
+    def _check_cloud_availability(self) -> None:
         """Check if cloud service is available (Sarvam)."""
         print("Checking Cloud API...")
         try:
-            test_response = get_cloud_response("Hi")
-            if test_response:
+            if not has_internet():
+                raise Exception("No internet connection")
+            if is_cloud_available():
                 self.cloud_available = True
                 print("✓ Cloud API is ready!")
                 return
@@ -243,16 +216,26 @@ class VoiceAssistant:
         self.cloud_available = False
         print("❌ Cloud API not available!")
         print("   Set SARVAM_API_KEY in your environment or .env")
+
+    def _init_db(self) -> None:
+        """Initialize conversation database manager."""
+        try:
+            if DBManager:
+                self.db = DBManager()
+                self.logger.info("Database manager initialized")
+        except Exception as e:
+            self.logger.warning(f"DB init failed: {e}")
     
-    def speak(self, text):
+    def speak(self, text: str) -> None:
         """Convert text to speech."""
         if not text:
             return
             
         print(f"🔊 {self.name}: {text}")
         
-        if self.mode == "online" and self.cloud_available and not self.offline_fallback_active:
+        if self.mode in ("online", "auto") and self.cloud_available and not self.offline_fallback_active:
             try:
+                self.logger.info("TTS: Using Sarvam online TTS")
                 lang = getattr(self, "last_detected_lang", None) or self.language
                 lang = lang.replace("_", "-")
                 if len(lang) == 5 and lang[2] == '-':
@@ -260,25 +243,49 @@ class VoiceAssistant:
                 audio_bytes = synthesize_speech(text, language_code=lang)
                 if platform.system().lower().startswith("win"):
                     import winsound
-                    winsound.PlaySound(audio_bytes, winsound.SND_MEMORY)
+                    self.playing_online = True
+                    winsound.PlaySound(audio_bytes, winsound.SND_MEMORY | winsound.SND_ASYNC)
                 else:
-                    buf = io.BytesIO(audio_bytes)
-                    with wave.open(buf, 'rb') as wf:
-                        stream = self.audio.open(format=pyaudio.paInt16, channels=wf.getnchannels(), rate=wf.getframerate(), output=True)
-                        data = wf.readframes(1024)
-                        while data:
-                            stream.write(data)
-                            data = wf.readframes(1024)
-                        stream.stop_stream()
-                        stream.close()
+                    def _play():
+                        try:
+                            buf = io.BytesIO(audio_bytes)
+                            with wave.open(buf, 'rb') as wf:
+                                stream = self.audio.open(format=pyaudio.paInt16, channels=wf.getnchannels(), rate=wf.getframerate(), output=True)
+                                while not self.stop_playback.is_set():
+                                    data = wf.readframes(1024)
+                                    if not data:
+                                        break
+                                    stream.write(data)
+                                stream.stop_stream()
+                                stream.close()
+                        finally:
+                            self.playing_online = False
+                    self.stop_playback.clear()
+                    self.playback_thread = threading.Thread(target=_play, daemon=True)
+                    self.playback_thread.start()
                 return
             except Exception as e:
-                print(f"⚠ Online TTS failed: {e}")
+                self.logger.error(f"TTS online error: {e}")
         
-        if not self.tts_handler:
-            print("⚠ TTS handler not available")
+        if not TTS_AVAILABLE:
+            print("⚠ TTS unavailable")
             return
-        self.tts_handler.speak(text)
+        try:
+            self.logger.info("TTS: Using offline pyttsx3 engine")
+            tts_engine.speak(text, lang_code=(self.last_detected_lang or self.language))
+        except Exception as e:
+            self.logger.error(f"TTS offline error: {e}")
+        try:
+            if self.db:
+                self.db.insert_conversation(
+                    user_text=getattr(self, "_last_user_text", None) or "",
+                    response_text=text,
+                    mode="online" if self.cloud_available and not self.offline_fallback_active else "offline",
+                    language=(self.last_detected_lang or self.language),
+                    metadata={"paused": self.paused},
+                )
+        except Exception as e:
+            self.logger.debug(f"DB insert failed: {e}")
     
     def listen_for_wake_word(self):
         """Listen for wake word using Porcupine."""
@@ -325,7 +332,7 @@ class VoiceAssistant:
             print(f"⚠ Wake word detection error: {e}")
             return True  # Continue anyway
     
-    def listen_for_command(self, timeout=15):
+    def listen_for_command(self, timeout: int = 15) -> Optional[str]:
         """Listen for voice command using Vosk."""
         audio_stream = None
         try:
@@ -403,13 +410,23 @@ class VoiceAssistant:
         
         if final_text:
             print(f"✓ You said: {final_text}")
+            # Multi-language detection
+            try:
+                from langdetect import detect
+                lang_guess = detect(final_text)
+                if lang_guess.startswith("hi"):
+                    self.last_detected_lang = "hi-IN"
+                else:
+                    self.last_detected_lang = "en-IN"
+            except Exception:
+                self.last_detected_lang = self.language.replace("_", "-").split('-')[0].lower() + "-IN"
             return final_text
         else:
             print("⚠ No speech detected")
             return None
 
 
-    def listen_for_command_online(self, timeout=15):
+    def listen_for_command_online(self, timeout: int = 15) -> Optional[str]:
         audio_stream = None
         try:
             audio_stream = self.audio.open(
@@ -470,18 +487,36 @@ class VoiceAssistant:
                 except Exception:
                     pass
     
-    def process_command(self, command):
+    def process_command(self, command: str) -> None:
         """Process voice command using cloud backend if available."""
         if not command:
             self.speak("I didn't catch that. Please try again.")
             return
         
         command_lower = command.lower()
+        self._last_user_text = command
         
         # Check for exit commands
-        if any(word in command_lower for word in ["goodbye", "exit", "quit", "stop", "bye"]):
+        if any(word in command_lower for word in ["goodbye", "exit", "quit", "bye"]):
             self.speak("Goodbye! Have a great day!")
             self.running = False
+            return
+        if "stop" in command_lower:
+            self.paused = True
+            # stop any online playback
+            try:
+                if platform.system().lower().startswith("win"):
+                    import winsound
+                    winsound.PlaySound(None, 0)
+                self.stop_playback.set()
+            except Exception as e:
+                self.logger.debug(f"Stop playback error: {e}")
+            # stop any offline tts
+            try:
+                tts_engine.shutdown_tts()
+            except Exception as e:
+                self.logger.debug(f"Shutdown TTS error: {e}")
+            self.speak("Paused. Say the wake word or press Enter to resume.")
             return
         
         # ===== PRIORITY LOCAL HANDLING (even in online mode) =====
@@ -498,9 +533,35 @@ class VoiceAssistant:
             current_date = datetime.now().strftime('%A, %B %d, %Y')
             self.speak(f"Today is {current_date}")
             return
+
+        # Temperature queries
+        if any(kw in command_lower for kw in ["temperature", "weather", "how hot", "how cold"]):
+            # Try to parse location keyword very simply
+            location = None
+            for token in ["in ", "at "]:
+                if token in command_lower:
+                    location = command_lower.split(token, 1)[1].strip()
+                    break
+            resp = self.realtime.get_weather_sync(location)
+            self.speak(resp)
+            return
+
+        # News queries
+        if any(kw in command_lower for kw in ["news", "headlines", "update me"]):
+            keys = (self.config.get("keys") or {})
+            api_key = keys.get("newsapi_key") or os.environ.get("NEWSAPI_KEY")
+            resp = self.realtime.get_news_sync(api_key=api_key)
+            self.speak(resp)
+            return
+
+        # Application launch
+        if any(kw in command_lower for kw in ["open", "launch", "start"]):
+            resp = self._launch_application(command_lower)
+            self.speak(resp)
+            return
         
         # Try cloud processing with selected provider
-        if self.cloud_available and not self.offline_fallback_active:
+        if self.mode in ("online", "auto") and self.cloud_available and not self.offline_fallback_active:
             try:
                 print("☁️ Processing with Cloud API...")
                 
@@ -535,7 +596,7 @@ class VoiceAssistant:
             response = self._offline_response(command)
         self.speak(response)
     
-    def _offline_response(self, query):
+    def _offline_response(self, query: str) -> str:
         """Simple offline responses when cloud is unavailable."""
         query_lower = query.lower()
         
@@ -563,8 +624,40 @@ class VoiceAssistant:
         
         # Default
         return "I'm sorry, I need cloud connection for that. Please set SARVAM_API_KEY if you want online features."
+
+    # Removed inline weather/news methods in favor of RealtimeAgent
+
+    def _launch_application(self, text_lower: str) -> str:
+        """Launch common Windows applications based on text."""
+        try:
+            if os.name != 'nt':
+                return "Application launching is supported on Windows only."
+            app_map = {
+                "notepad": "notepad.exe",
+                "calculator": "calc.exe",
+                "paint": "mspaint.exe",
+                "wordpad": "write.exe",
+            }
+            for name, exe in app_map.items():
+                if name in text_lower:
+                    os.startfile(exe)
+                    return f"Opening {name}"
+            import webbrowser
+            if "youtube" in text_lower:
+                webbrowser.open("https://www.youtube.com/")
+                return "Opening YouTube"
+            if "browser" in text_lower or "chrome" in text_lower:
+                try:
+                    os.startfile("chrome.exe")
+                    return "Opening Chrome"
+                except Exception:
+                    webbrowser.open("https://www.google.com")
+                    return "Opening browser"
+            return "Please specify a known application to open"
+        except Exception as e:
+            return f"Failed to open application: {e}"
     
-    def run(self):
+    def run(self) -> None:
         """Run the voice assistant."""
         print(f"\n{'='*60}")
         print(f"  {self.name} Voice Assistant - Voice Mode")
@@ -606,6 +699,9 @@ class VoiceAssistant:
 
 
                 while self.running and (time.time() - last_activity) < active_window:
+                    if self.paused:
+                        print("⏸ Paused. Waiting for wake word or resume...")
+                        break
                     if self.mode == "online" and self.cloud_available and not self.offline_fallback_active:
                         command = self.listen_for_command_online(timeout=listen_timeout)
                     else:
@@ -633,7 +729,7 @@ class VoiceAssistant:
         finally:
             self.cleanup()
     
-    def cleanup(self):
+    def cleanup(self) -> None:
         """Clean up resources."""
         print("\n🧹 Cleaning up...")
         
@@ -647,7 +743,7 @@ class VoiceAssistant:
 
 
 
-def main():
+def main() -> None:
     """Main entry point."""
     print(f"\n{'='*60}")
     print(f"  DALI Voice Assistant")

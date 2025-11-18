@@ -11,7 +11,7 @@ from typing import Optional, Tuple
 import base64
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config_loader import load_config
+from utils.config import load_config
 
 config = None
 try:
@@ -156,7 +156,6 @@ def synthesize_speech(text: str, language_code: str = "en-IN", speaker: str = "A
         Audio bytes in the specified format
     """
     _ensure_api_key()
-    url = "https://api.sarvam.ai/v1/text-to-speech/convert"
     headers = {
         "api-subscription-key": f"{SARVAM_API_KEY}",
         "Content-Type": "application/json",
@@ -169,16 +168,21 @@ def synthesize_speech(text: str, language_code: str = "en-IN", speaker: str = "A
         "format": audio_format,
         "input": [text],
     }
-    try:
-        resp = requests.post(url, headers=headers, json=payload, timeout=TIMEOUT)
-        resp.raise_for_status()
-        data = resp.json()
-        audios = data.get("audio") or data.get("audios") or []
-        if isinstance(audios, list) and audios:
-            b = base64.b64decode(audios[0])
-            return b
-        elif isinstance(audios, str):
-            return base64.b64decode(audios)
-        raise Exception("No audio returned")
-    except Exception as e:
-        raise Exception(f"Sarvam TTS failed: {e}")
+    last_error = None
+    for url in [
+        "https://api.sarvam.ai/v1/text-to-speech/convert",
+        "https://api.sarvam.ai/v1/text-to-speech",
+    ]:
+        try:
+            resp = requests.post(url, headers=headers, json=payload, timeout=TIMEOUT)
+            resp.raise_for_status()
+            data = resp.json()
+            audios = data.get("audio") or data.get("audios") or []
+            if isinstance(audios, list) and audios:
+                return base64.b64decode(audios[0])
+            elif isinstance(audios, str):
+                return base64.b64decode(audios)
+        except Exception as e:
+            last_error = e
+            continue
+    raise Exception(f"Sarvam TTS failed: {last_error}")

@@ -23,8 +23,16 @@
     "en-in": "Zira",     
     "hi-in": "Microsoft Hemant"
   },
+  "db": {
+    "host": "${MYSQL_HOST}",
+    "user": "${MYSQL_USER}",
+    "password": "${MYSQL_PASSWORD}",
+    "db": "${MYSQL_DB}"
+  },
   "keys": {
     "picovoice": "${PICOVOICE_ACCESS_KEY}",
-    "sarvam_api_key": "${SARVAM_API_KEY}"
+    "sarvam_api_key": "${SARVAM_API_KEY}",
+    "openweather_api_key": "${OPENWEATHER_API_KEY}",
+    "news_api_key": "${NEWS_API_KEY}"
   }
 }
