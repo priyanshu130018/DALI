@@ -7,21 +7,10 @@ API key is read from env `SARVAM_API_KEY` or from config `keys.sarvam_api_key`.
 import os
 import sys
 import requests
-from typing import Optional
+from typing import Optional, Tuple
 import base64
-from io import BytesIO
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from config_loader import load_config
-import os
-import sys
-import requests
-from typing import Optional
-from config_loader import load_config
-import os
-import sys
-import requests
-from typing import Optional
 from config_loader import load_config
 
 config = None
@@ -134,7 +123,13 @@ def get_cloud_response(prompt: str, system_prompt: Optional[str] = None) -> str:
         raise Exception(f"Unexpected response format: {e}")
 
 
-def transcribe_audio(audio_bytes: bytes, language_code: Optional[str] = None, model: str = "saarika:v2.5") -> str:
+def transcribe_audio(audio_bytes: bytes, language_code: Optional[str] = None, model: str = "saarika:v2.5") -> Tuple[str, Optional[str]]:
+    """
+    Transcribe audio using Sarvam API.
+    
+    Returns:
+        Tuple of (transcript_text, detected_language_code)
+    """
     _ensure_api_key()
     url = "https://api.sarvam.ai/v1/speech-to-text"
     headers = {"api-subscription-key": f"{SARVAM_API_KEY}"}
@@ -147,12 +142,19 @@ def transcribe_audio(audio_bytes: bytes, language_code: Optional[str] = None, mo
         resp.raise_for_status()
         j = resp.json()
         text = j.get("transcript") or j.get("text") or ""
-        return text.strip()
+        detected_lang = j.get("language_code") or language_code
+        return text.strip(), detected_lang
     except Exception as e:
         raise Exception(f"Sarvam STT failed: {e}")
 
 
 def synthesize_speech(text: str, language_code: str = "en-IN", speaker: str = "Anushka", model: str = "bulbul:v2", speed: float = 1.0, audio_format: str = "wav") -> bytes:
+    """
+    Synthesize speech using Sarvam API.
+    
+    Returns:
+        Audio bytes in the specified format
+    """
     _ensure_api_key()
     url = "https://api.sarvam.ai/v1/text-to-speech/convert"
     headers = {
@@ -180,4 +182,3 @@ def synthesize_speech(text: str, language_code: str = "en-IN", speaker: str = "A
         raise Exception("No audio returned")
     except Exception as e:
         raise Exception(f"Sarvam TTS failed: {e}")
-

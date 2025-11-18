@@ -4,6 +4,7 @@ Uses Sarvam API for cloud processing when available.
 Listens via microphone, responds with voice.
 """
 
+
 import os
 import sys
 import json
@@ -15,8 +16,10 @@ import audioop
 import platform
 from pathlib import Path
 
+
 # Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
 
 try:
     from config_loader import load_config
@@ -30,6 +33,7 @@ except ImportError as e:
     print(f"Error importing modules: {e}")
     sys.exit(1)
 
+
 # Required imports for voice mode
 try:
     import pvporcupine
@@ -37,6 +41,7 @@ try:
 except ImportError:
     PORCUPINE_AVAILABLE = False
     print("WARNING: pvporcupine not installed. Wake word detection disabled.")
+
 
 try:
     import pyaudio
@@ -46,6 +51,7 @@ except ImportError:
     print("ERROR: pyaudio not installed!")
     print("Install with: pip install pyaudio")
 
+
 try:
     import pyttsx3
     TTS_AVAILABLE = True
@@ -54,6 +60,7 @@ except ImportError:
     print("ERROR: pyttsx3 not installed!")
     print("Install with: pip install pyttsx3==2.91")
 
+
 try:
     from vosk import Model, KaldiRecognizer
     VOSK_AVAILABLE = True
@@ -61,6 +68,7 @@ except ImportError:
     VOSK_AVAILABLE = False
     print("ERROR: vosk not installed!")
     print("Install with: pip install vosk")
+
 
 
 class TTSHandler:
@@ -114,6 +122,7 @@ class TTSHandler:
             print(f"⚠ TTS error: {e}")
             import traceback
             traceback.print_exc()
+
 
 
 class VoiceAssistant:
@@ -399,6 +408,7 @@ class VoiceAssistant:
             print("⚠ No speech detected")
             return None
 
+
     def listen_for_command_online(self, timeout=15):
         audio_stream = None
         try:
@@ -472,6 +482,21 @@ class VoiceAssistant:
         if any(word in command_lower for word in ["goodbye", "exit", "quit", "stop", "bye"]):
             self.speak("Goodbye! Have a great day!")
             self.running = False
+            return
+        
+        # ===== PRIORITY LOCAL HANDLING (even in online mode) =====
+        # Time queries
+        if any(kw in command_lower for kw in ["time", "current time", "what time", "tell me the time"]):
+            from datetime import datetime
+            current_time = datetime.now().strftime('%I:%M %p').lstrip('0')
+            self.speak(f"The time is {current_time}")
+            return
+        
+        # Date queries
+        if any(kw in command_lower for kw in ["date", "today", "what day", "current date", "today's date"]):
+            from datetime import datetime
+            current_date = datetime.now().strftime('%A, %B %d, %Y')
+            self.speak(f"Today is {current_date}")
             return
         
         # Try cloud processing with selected provider
@@ -569,13 +594,16 @@ class VoiceAssistant:
                 if not self.listen_for_wake_word():
                     continue
 
+
                 if self.porcupine:
                     self.speak("Yes?")
+
 
                 active_window = self.assistant_config.get("sleep_timeout", 300)
                 listen_timeout = self.assistant_config.get("listen_timeout", 30)
                 last_activity = time.time()
                 print(f"🕑 Awake for up to {int(active_window/60)} minutes. Say a command.")
+
 
                 while self.running and (time.time() - last_activity) < active_window:
                     if self.mode == "online" and self.cloud_available and not self.offline_fallback_active:
@@ -583,13 +611,16 @@ class VoiceAssistant:
                     else:
                         command = self.listen_for_command(timeout=listen_timeout)
 
+
                     if command:
                         last_activity = time.time()
                         self.process_command(command)
                     else:
                         print("… No speech detected. Staying awake until timeout.", end='\r')
 
+
                     time.sleep(0.2)
+
 
                 print("\n😴 No voice activity. Going back to sleep.")
                 
@@ -613,6 +644,7 @@ class VoiceAssistant:
             self.audio.terminate()
         
         print(f"{self.name} stopped.\n")
+
 
 
 def main():
@@ -646,6 +678,7 @@ def main():
         import traceback
         traceback.print_exc()
         sys.exit(1)
+
 
 
 def test_microphone():
@@ -728,6 +761,7 @@ def test_microphone():
         print(f"❌ Test failed: {e}")
         import traceback
         traceback.print_exc()
+
 
 
 if __name__ == "__main__":
